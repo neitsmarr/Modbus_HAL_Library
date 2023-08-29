@@ -42,14 +42,12 @@ uint8_t communication_parity;
 uint8_t communication_baudrate;
 uint8_t communication_slave_id;
 
-uint32_t input_reg_count, hold_reg_count;
-
 /*FUNCTION PROTOTYPES*/
 /*for internal use only*/
-static void Send_Response(UART_HandleTypeDef *huart, uint8_t count);
-static void Check_Frame(UART_HandleTypeDef *huart);
-static void Process_Request(UART_HandleTypeDef *huart);
-static void Send_Exeption(UART_HandleTypeDef *huart, uint8_t exeption_code);
+static void Send_Response(modbus_handle_t *hmodbus, uint8_t count);
+static void Check_Frame(modbus_handle_t *hmodbus);
+static void Process_Request(modbus_handle_t *hmodbus);
+static void Send_Exeption(modbus_handle_t *hmodbus, uint8_t exeption_code);
 static uint16_t Calculate_CRC16(uint8_t *buf, uint16_t length);
 
 /*PUBLIC FUNCTIONS*/
@@ -66,18 +64,14 @@ uint32_t MBR_Get_Version(void)
  * @param huart UART handle.
  * @retval void (HAL status)
  */
-void MBR_Init_Modbus(UART_HandleTypeDef *huart, uint32_t i_reg_count, uint32_t h_reg_count)
+void MBR_Init_Modbus(modbus_handle_t *hmodbus)
 {
-	input_reg_count = i_reg_count;
-	hold_reg_count = h_reg_count;
-
 	//init usart and dma
-	HAL_UART_ReceiverTimeout_Config(huart, 34);
-	HAL_UART_EnableReceiverTimeout(huart);
-	HAL_UART_Receive_DMA(huart, buf_modbus, 0x100);
+	HAL_UART_ReceiverTimeout_Config(hmodbus->huart, 34);
+	HAL_UART_EnableReceiverTimeout(hmodbus->huart);
+	HAL_UART_Receive_DMA(hmodbus->huart, buf_modbus, 0x100);
 
-
-	MBR_Update_Communication_Parameters(huart);
+	MBR_Update_Communication_Parameters(hmodbus);
 }
 
 /**
@@ -85,20 +79,23 @@ void MBR_Init_Modbus(UART_HandleTypeDef *huart, uint32_t i_reg_count, uint32_t h
  * @param none
  * @retval none
  */
-void MBR_Check_For_Request(UART_HandleTypeDef *huart)
+void MBR_Check_For_Request(modbus_handle_t *hmodbus)
 {
+	UART_HandleTypeDef *huart;
 	uint32_t modbus_no_comm, current_tick;
+
+	huart = hmodbus->huart;
 
 	if(flg_modbus_packet_received)
 	{
 		flg_modbus_packet_received = 0;
 
-		if(huart->ErrorCode == HAL_UART_ERROR_RTO)
+		if(huart->ErrorCode == HAL_UART_ERROR_RTO)	//TODO clear this error somewhere
 		{
 			len_modbus_frame = MODBUS_BUFFER_SIZE - huart->hdmarx->Instance->CNDTR;
-			if(len_modbus_frame > 7)
+			if(len_modbus_frame > 7)	//minimum Modbus frame length (for requests)
 			{
-				Check_Frame(huart);
+				Check_Frame(hmodbus);
 			}
 		}
 		else
@@ -135,7 +132,7 @@ void MBR_Check_For_Request(UART_HandleTypeDef *huart)
  * @param none
  * @retval 0 = ok (new value is allowed), 1 = not ok (new value is not allowed)
  */
-__weak uint8_t MBR_Check_Restrictions_Callback(uint16_t register_address, uint16_t register_data)
+__weak uint8_t MBR_Check_Restrictions_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t register_data)
 {
 	UNUSED(register_address);
 	UNUSED(register_data);
@@ -147,14 +144,14 @@ __weak uint8_t MBR_Check_Restrictions_Callback(uint16_t register_address, uint16
  * @param none
  * @retval none
  */
-__weak void MBR_Register_Update_Callback(uint16_t register_address, uint16_t register_data)
+__weak void MBR_Register_Update_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t register_data)
 {
 	UNUSED(register_address);
 	UNUSED(register_data);
 }
 
 
-__weak void MBR_Register_Init_Callback(uint16_t register_address, uint16_t *register_data)
+__weak void MBR_Register_Init_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data)
 {
 	UNUSED(register_address);
 	UNUSED(register_data);
@@ -234,7 +231,7 @@ static uint16_t Calculate_CRC16(uint8_t *buf, uint16_t len)	//TODO compute table
 }
 
 
-static void Check_Frame(UART_HandleTypeDef *huart)
+static void Check_Frame(modbus_handle_t *hmodbus)
 {
 	uint16_t crc_int;
 
@@ -242,16 +239,16 @@ static void Check_Frame(UART_HandleTypeDef *huart)
 
 	if(crc_int == Calculate_CRC16(buf_modbus,(len_modbus_frame-2)))	// Check does the CRC match
 	{
-		if ((buf_modbus[0] == communication_slave_id) || buf_modbus[0] == 0x00)	//Check if the device address is correct
+		if ((buf_modbus[0] == hmodbus->init.slave_id) || buf_modbus[0] == 0x00)	//Check if the device address is correct
 		{
-			Process_Request(huart);	// Return flag OK;
+			Process_Request(hmodbus);	// Return flag OK;
 			flg_modbus_no_comm = 0;
 			last_communication_time = HAL_GetTick();
 		}
 	}
 }
 
-static void Read_Input_Registers(struct response_s *response_s)
+static void Read_Input_Registers(modbus_handle_t *hmodbus, struct response_s *response_s)
 {
 	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t register_count, crc16, data;
@@ -259,15 +256,15 @@ static void Read_Input_Registers(struct response_s *response_s)
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 	buf_modbus[2] = register_count*2;	// byte count
 
-	if(register_count + start_address > input_reg_count)
-	{
-		response_s->exception = 0x02;
-	}
-	else
+//	if(register_count + start_address > input_reg_count)
+//	{
+//		response_s->exception = 0x02;
+//	}
+//	else
 	{
 		for(uint32_t i = start_address; i < start_address + register_count; i++)
 		{
-			MBR_Register_Read_Callback(i, &data);
+			MBR_Register_Read_Callback(hmodbus, i, &data);
 			buf_modbus[3+(i-start_address)*2] = data>>8;
 			buf_modbus[4+(i-start_address)*2] = data;
 		}
@@ -280,7 +277,7 @@ static void Read_Input_Registers(struct response_s *response_s)
 	response_s->frame_size = 5 + buf_modbus[2];
 }
 
-static void Read_Holding_Registers(struct response_s *response_s)
+static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *response_s)
 {
 	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t register_count, crc16, data;
@@ -290,15 +287,15 @@ static void Read_Holding_Registers(struct response_s *response_s)
 
 	if(start_address + register_count < 1000)	//TODO add special cases
 	{
-		if(register_count + start_address > hold_reg_count)
-		{
-			response_s->exception = 0x02;
-		}
-		else
+//		if(register_count + start_address > hold_reg_count)
+//		{
+//			response_s->exception = 0x02;
+//		}
+//		else
 		{
 			for(uint32_t i = start_address; i < start_address + register_count; i++)
 			{
-				MBR_Register_Read_Callback(i, &data);
+				MBR_Register_Read_Callback(hmodbus, i, &data);
 				buf_modbus[3+(i-start_address)*2] = data>>8;
 				buf_modbus[4+(i-start_address)*2] = data;
 			}
@@ -321,7 +318,7 @@ static void Read_Holding_Registers(struct response_s *response_s)
 	}
 }
 
-static void Write_Multiple_Registers(UART_HandleTypeDef *huart, struct response_s *response_s)
+static void Write_Multiple_Registers(modbus_handle_t *hmodbus, struct response_s *response_s)
 {
 	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t register_count, crc16;
@@ -332,11 +329,11 @@ static void Write_Multiple_Registers(UART_HandleTypeDef *huart, struct response_
 
 	if(start_address < 1000)
 	{
-		if(register_count + start_address > hold_reg_count)
-		{
-			response_s->exception = 0x02;
-		}
-		else if(buf_modbus[6] != len_modbus_frame-9)	//buffer[6] - byte count: 7 bytes - header, 2 bytes - CRC
+//		if(register_count + start_address > hold_reg_count)
+//		{
+//			response_s->exception = 0x02;
+//		}
+		/*else*/ if(buf_modbus[6] != len_modbus_frame-9)	//buffer[6] - byte count: 7 bytes - header, 2 bytes - CRC
 		{
 			response_s->exception = 0x03;
 		}
@@ -344,13 +341,13 @@ static void Write_Multiple_Registers(UART_HandleTypeDef *huart, struct response_
 		{
 			for(uint32_t i = start_address; i < start_address + register_count; i++)
 			{
-				if(MBR_Check_Restrictions_Callback(start_address, reg_data))
+				if(MBR_Check_Restrictions_Callback(hmodbus, start_address, reg_data))
 				{
 					response_s->exception = 0x03;
 				}
 				else
 				{
-					MBR_Register_Update_Callback(start_address, reg_data);
+					MBR_Register_Update_Callback(hmodbus, start_address, reg_data);
 				}
 
 			}
@@ -363,7 +360,7 @@ static void Write_Multiple_Registers(UART_HandleTypeDef *huart, struct response_
 
 	for(uint32_t i = start_address; i < start_address + register_count; i++)//write the new data;	//TODO move it under flag no_exception
 	{
-		MBR_Register_Update_Callback(i, uint_hold_reg_temporary[i]);
+		MBR_Register_Update_Callback(hmodbus, i, uint_hold_reg_temporary[i]);
 	}
 
 	crc16 = Calculate_CRC16(buf_modbus,6);
@@ -372,7 +369,7 @@ static void Write_Multiple_Registers(UART_HandleTypeDef *huart, struct response_
 	response_s->frame_size = 8;
 }
 
-static void Write_Single_Register(UART_HandleTypeDef *huart, struct response_s *response_s)
+static void Write_Single_Register(modbus_handle_t *hmodbus, struct response_s *response_s)
 {
 	uint16_t start_address = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t crc16;
@@ -380,20 +377,19 @@ static void Write_Single_Register(UART_HandleTypeDef *huart, struct response_s *
 
 	reg_data = (buf_modbus[4]<<8)+ buf_modbus[5];
 
-	if(start_address >= hold_reg_count)
+//	if(start_address >= hold_reg_count)
+//	{
+//		response_s->exception = 0x02;
+//	}
+//	else
 	{
-		response_s->exception = 0x02;
-	}
-
-	else
-	{
-		if(MBR_Check_Restrictions_Callback(start_address, reg_data))
+		if(MBR_Check_Restrictions_Callback(hmodbus, start_address, reg_data))
 		{
 			response_s->exception = 0x03;
 		}
 		else
 		{
-			MBR_Register_Update_Callback(start_address, reg_data);
+			MBR_Register_Update_Callback(hmodbus, start_address, reg_data);
 		}
 	}
 
@@ -406,7 +402,7 @@ static void Write_Single_Register(UART_HandleTypeDef *huart, struct response_s *
 }
 
 
-static void Process_Request(UART_HandleTypeDef *huart)
+static void Process_Request(modbus_handle_t *hmodbus)
 {
 	struct response_s response_s = {0, 0, 0};
 
@@ -418,19 +414,19 @@ static void Process_Request(UART_HandleTypeDef *huart)
 	switch(buf_modbus[1])
 	{
 	case read_input_registers:
-		Read_Input_Registers(&response_s);
+		Read_Input_Registers(hmodbus, &response_s);
 		break;
 
 	case read_holding_registers:
-		Read_Holding_Registers(&response_s);
+		Read_Holding_Registers(hmodbus, &response_s);
 		break;
 
 	case write_single_register:
-		Write_Single_Register(huart, &response_s);
+		Write_Single_Register(hmodbus, &response_s);
 		break;
 
 	case write_multiple_registers:
-		Write_Multiple_Registers(huart, &response_s);
+		Write_Multiple_Registers(hmodbus, &response_s);
 		break;
 
 	case 103:	//GO TO AUTOASSIGNMENT MODE
@@ -449,22 +445,22 @@ static void Process_Request(UART_HandleTypeDef *huart)
 	{
 		if(response_s.exception)
 		{
-			Send_Exeption(huart, response_s.exception);
+			Send_Exeption(hmodbus, response_s.exception);
 		}
 		else
 		{
-			Send_Response(huart, response_s.frame_size);	// Send packet response
+			Send_Response(hmodbus, response_s.frame_size);	// Send packet response
 		}
 	}
 }
 
-static void Send_Response(UART_HandleTypeDef *huart, uint8_t count)
+static void Send_Response(modbus_handle_t *hmodbus, uint8_t count)
 {
-	MBR_Start_Sending_Callback(huart);
-	HAL_UART_Transmit_DMA(huart, buf_modbus, count);
+	MBR_Start_Sending_Callback(hmodbus->huart);
+	HAL_UART_Transmit_DMA(hmodbus->huart, buf_modbus, count);
 }
 
-static void Send_Exeption(UART_HandleTypeDef *huart, uint8_t exeption_code)
+static void Send_Exeption(modbus_handle_t *hmodbus, uint8_t exeption_code)
 {
 	uint16_t crc16;
 	buf_modbus[0] = communication_slave_id;	// Device address
@@ -473,14 +469,18 @@ static void Send_Exeption(UART_HandleTypeDef *huart, uint8_t exeption_code)
 	crc16 = Calculate_CRC16(buf_modbus,3);
 	buf_modbus[3] = crc16;	// CRC Lo byte
 	buf_modbus[4] = crc16>>8;	// CRC Hi byte
-	Send_Response(huart, 5);	// Send packet response
+	Send_Response(hmodbus, 5);	// Send packet response
 }
 
 
-void MBR_Update_Communication_Parameters(UART_HandleTypeDef *huart)
+void MBR_Update_Communication_Parameters(modbus_handle_t *hmodbus)
 {
+	UART_HandleTypeDef *huart;
+
+	huart = hmodbus->huart;
+
 	/*parity*/
-	switch (communication_parity)
+	switch (hmodbus->init.parity)
 	{
 	case 0:	//none
 		huart->Init.WordLength = UART_WORDLENGTH_8B;
@@ -496,7 +496,7 @@ void MBR_Update_Communication_Parameters(UART_HandleTypeDef *huart)
 		break;
 	} //default is even parity
 
-	switch (communication_baudrate)
+	switch (hmodbus->init.baudrate)
 	{
 	case 0:
 		huart->Init.BaudRate = 4800;
@@ -528,11 +528,6 @@ void MBR_Update_Communication_Parameters(UART_HandleTypeDef *huart)
 		break;
 	} //default is 19200
 
-//	huart->Instance = USART1;
-//	huart->Init.StopBits = UART_STOPBITS_1;
-//	huart->Init.Mode = UART_MODE_TX_RX;
-//	huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
-//	huart->Init.OverSampling = UART_OVERSAMPLING_16;
 	HAL_UART_Init(huart);
 }
 

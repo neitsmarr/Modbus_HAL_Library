@@ -3,21 +3,42 @@
 
 #include "main.h"
 
+typedef struct __modbus_init_t
+{
+	uint8_t				slave_id;	//communication parameters
+	uint8_t				baudrate;	//pointer to holding register buffer
+	uint8_t				parity;		//number of input registers
+} modbus_init_t;
+
+
+typedef struct __modbus_hanle_t
+{
+	modbus_init_t		init;					//communication parameters
+//	const uint16_t		*input_registers;		//pointer to input register buffer
+//	uint8_t				ir_quantity;			//number of input registers
+//	const uint16_t		*holding_registers;		//pointer to holding register buffer
+//	uint8_t				hr_quantity;			//number of holding registers
+	uint32_t			mode;					//slave / master / slave+master
+	UART_HandleTypeDef	*huart;					//pointer to UART handle
+	HAL_LockTypeDef		Lock;					//locking object (useful for RTOS)
+	uint32_t			ErrorCode;				//error code
+} modbus_handle_t;
+
 
 /*MODBUS LIBRARY SETTINGS*/
 
 /*FUNCTIONS THAT CAN BE USED IN OTHER MODULES*/
 uint32_t FEE_Get_Version(void);
-void MBR_Init_Modbus(UART_HandleTypeDef *huart, uint32_t i_reg_count, uint32_t h_reg_count);	//call this function in main.c after initialization of all hardware
-void MBR_Check_For_Request(UART_HandleTypeDef *huart);
+void MBR_Init_Modbus(modbus_handle_t *hmodbus);	//call this function in main.c after initialization of all hardware
+void MBR_Check_For_Request(modbus_handle_t *hmodbus);
 void MBR_Switch_DE_Callback(uint8_t state);	//weak ref, can be defined in other modules. state variants: 0=reset_DERE, 1=set_DERE
-uint8_t MBR_Check_Restrictions_Callback(uint16_t register_address, uint16_t register_data);	//weak ref, can be defined in other modules. return 0 when OK, return 1 when NOK
-void MBR_Register_Update_Callback(uint16_t register_address, uint16_t register_data);
-void MBR_Register_Read_Callback(uint16_t register_address, uint16_t *register_data);
-void MBR_Register_Init_Callback(uint16_t register_address, uint16_t *register_data);
+uint8_t MBR_Check_Restrictions_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t register_data);	//weak ref, can be defined in other modules. return 0 when OK, return 1 when NOK
+void MBR_Register_Update_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t register_data);
+void MBR_Register_Read_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data);
+void MBR_Register_Init_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data);
 void MBR_Start_Sending_Callback(UART_HandleTypeDef *huart);
 void MBR_End_Sending_Callback(UART_HandleTypeDef *huart);
-void MBR_Update_Communication_Parameters(UART_HandleTypeDef *huart);
+void MBR_Update_Communication_Parameters(modbus_handle_t *hmodbus);
 
 
 
@@ -27,6 +48,7 @@ void MBR_Update_Communication_Parameters(UART_HandleTypeDef *huart);
 /*flags*/
 extern uint8_t flg_modbus_no_comm;	//raises after uint_hold_reg[7] seconds
 extern uint8_t flg_modbus_packet_received;
+
 
 
 
