@@ -4,7 +4,7 @@
 enum
 {
 	MBR_VERSION_MAJOR = 0x00,
-	MBR_VERSION_MINOR = 0x02,
+	MBR_VERSION_MINOR = 0x03,
 	MBR_VERSION_PATCH = 0x00
 };
 
@@ -18,9 +18,20 @@ enum function_code_e
 	read_input_registers = 0x04,
 	write_single_register = 0x06,
 	write_multiple_registers = 0x10,
-	error = 0x80
+	exception = 0x80
 };
 
+enum exception_code_e
+{
+	illegal_function			= 0x01,
+	illegal_data_address		= 0x02,
+	illegal_data_value			= 0x03,
+	slave_device_failure		= 0x04,
+	acknowledgement				= 0x05,
+	slave_device_busy			= 0x06,
+	negative_acknowledgement	= 0x07,
+	memory_parity_error			= 0x08
+};
 
 struct response_s {
 	uint8_t exception;;
@@ -72,6 +83,19 @@ void MBR_Init_Modbus(modbus_handle_t *hmodbus)
 	HAL_UART_Receive_DMA(hmodbus->huart, buf_modbus, 0x100);
 
 	MBR_Update_Communication_Parameters(hmodbus);
+}
+
+void MBR_Add_Address_Space(modbus_handle_t *hmodbus, address_space_t *address_space)
+{
+	//if(hmodbus->num_address_spaces < 8)
+	hmodbus->address_spaces[hmodbus->num_address_spaces] = *address_space;
+	hmodbus->num_address_spaces++;
+}
+
+void MBR_Remove_Address_Space(modbus_handle_t *hmodbus, uint16_t *address)
+{
+	UNUSED(hmodbus);
+	UNUSED(address);
 }
 
 /**
@@ -256,11 +280,20 @@ static void Read_Input_Registers(modbus_handle_t *hmodbus, struct response_s *re
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 	buf_modbus[2] = register_count*2;	// byte count
 
-//	if(register_count + start_address > input_reg_count)
-//	{
-//		response_s->exception = 0x02;
-//	}
-//	else
+	response_s->exception = 0x02;
+	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
+	{
+		if(hmodbus->address_spaces[i].type == input_registers)
+		{
+			if(start_address >= hmodbus->address_spaces[i].start_offset && start_address + register_count <= hmodbus->address_spaces[i].start_offset + hmodbus->address_spaces[i].size)
+			{
+				response_s->exception = 0x00;
+				break;
+			}
+		}
+	}
+
+	if(response_s->exception == 0)
 	{
 		for(uint32_t i = start_address; i < start_address + register_count; i++)
 		{
@@ -285,25 +318,27 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 	buf_modbus[2] = register_count*2;	// byte count
 
-	if(start_address + register_count < 1000)	//TODO add special cases
+	response_s->exception = 0x02;
+	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
-//		if(register_count + start_address > hold_reg_count)
-//		{
-//			response_s->exception = 0x02;
-//		}
-//		else
+		if(hmodbus->address_spaces[i].type == holding_registers)
 		{
-			for(uint32_t i = start_address; i < start_address + register_count; i++)
+			if(start_address >= hmodbus->address_spaces[i].start_offset && start_address + register_count <= hmodbus->address_spaces[i].start_offset + hmodbus->address_spaces[i].size)
 			{
-				MBR_Register_Read_Callback(hmodbus, i, &data);
-				buf_modbus[3+(i-start_address)*2] = data>>8;
-				buf_modbus[4+(i-start_address)*2] = data;
+				response_s->exception = 0x00;
+				break;
 			}
 		}
 	}
-	else
+
+	if(response_s->exception == 0)
 	{
-		response_s->exception = 0x02;
+		for(uint32_t i = start_address; i < start_address + register_count; i++)
+		{
+			MBR_Register_Read_Callback(hmodbus, i, &data);
+			buf_modbus[3+(i-start_address)*2] = data>>8;
+			buf_modbus[4+(i-start_address)*2] = data;
+		}
 	}
 
 	crc16 = Calculate_CRC16(buf_modbus,3+buf_modbus[2]);
@@ -464,7 +499,7 @@ static void Send_Exeption(modbus_handle_t *hmodbus, uint8_t exeption_code)
 {
 	uint16_t crc16;
 	buf_modbus[0] = communication_slave_id;	// Device address
-	buf_modbus[1] += error;	// Modbus error code (0x80+command)
+	buf_modbus[1] += exception;	// Modbus error code (0x80+command)
 	buf_modbus[2] = exeption_code;	// exception code
 	crc16 = Calculate_CRC16(buf_modbus,3);
 	buf_modbus[3] = crc16;	// CRC Lo byte
