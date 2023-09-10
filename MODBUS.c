@@ -4,7 +4,7 @@
 enum
 {
 	MBR_VERSION_MAJOR = 0x00,
-	MBR_VERSION_MINOR = 0x03,
+	MBR_VERSION_MINOR = 0x04,
 	MBR_VERSION_PATCH = 0x00
 };
 
@@ -94,8 +94,22 @@ void MBR_Add_Address_Space(modbus_handle_t *hmodbus, address_space_t *address_sp
 
 void MBR_Remove_Address_Space(modbus_handle_t *hmodbus, uint16_t *address)
 {
-	UNUSED(hmodbus);
-	UNUSED(address);
+	uint8_t address_deleted;
+
+	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
+	{
+		if(hmodbus->address_spaces[i].address == address)	//TODO address has not been found
+		{
+			hmodbus->num_address_spaces--;
+			address_deleted = i;
+			break;
+		}
+	}
+
+	for(uint32_t i=address_deleted; i<hmodbus->num_address_spaces; i++)
+	{
+		hmodbus->address_spaces[i] = hmodbus->address_spaces[i+1];
+	}
 }
 
 /**
@@ -174,6 +188,12 @@ __weak void MBR_Register_Update_Callback(modbus_handle_t *hmodbus, uint16_t regi
 	UNUSED(register_data);
 }
 
+__weak void MBR_Register_Read_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data)
+{
+	UNUSED(hmodbus);
+	UNUSED(register_address);
+	UNUSED(register_data);
+}
 
 __weak void MBR_Register_Init_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data)
 {
@@ -191,6 +211,11 @@ __weak void MBR_End_Sending_Callback(UART_HandleTypeDef *huart)
 	UNUSED(huart);
 }
 
+__weak uint32_t Custom_Command_Callback(modbus_handle_t *hmodbus)
+{
+	UNUSED(hmodbus);
+	return illegal_function;
+}
 
 /*HAL CALLBACKS*/
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -436,7 +461,6 @@ static void Write_Single_Register(modbus_handle_t *hmodbus, struct response_s *r
 	response_s->frame_size = 8;
 }
 
-
 static void Process_Request(modbus_handle_t *hmodbus)
 {
 	struct response_s response_s = {0, 0, 0};
@@ -464,16 +488,8 @@ static void Process_Request(modbus_handle_t *hmodbus)
 		Write_Multiple_Registers(hmodbus, &response_s);
 		break;
 
-	case 103:	//GO TO AUTOASSIGNMENT MODE
-	case 100:	//SEND RECOGNITION ANSWER
-	case 101:	//CONFIRMATION STEP
-	case 102:	//GET THE NEW ID
-	case 104:	//LEAVE AUTOASSIGNMENT MODE
-//		Process_Autoassignment_Request(&response_s);
-		break;
-
 	default:	//if the command is not supported
-		response_s.exception = 0x01;
+		response_s.exception = Custom_Command_Callback(hmodbus);
 	}
 
 	if(response_s.flg_response)
