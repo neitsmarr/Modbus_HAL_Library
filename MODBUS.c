@@ -1,10 +1,12 @@
 /*MODBUS.c*/
 #include "MODBUS.h"
+#include <stdlib.h>
+#include <string.h>
 
 enum
 {
 	MBR_VERSION_MAJOR = 0x00,
-	MBR_VERSION_MINOR = 0x04,
+	MBR_VERSION_MINOR = 0x05,
 	MBR_VERSION_PATCH = 0x00
 };
 
@@ -39,6 +41,36 @@ struct response_s {
 	uint8_t flg_response;
 };
 
+typedef struct __modbus_init_t
+{
+	uint8_t				slave_id;	//communication parameters
+	uint8_t				baudrate;	//pointer to holding register buffer
+	uint8_t				parity;		//number of input registers
+} modbus_init_t;
+
+typedef struct __address_space_t
+{
+	register_type_t		type;
+	uint16_t			start_offset;
+	uint16_t			size;
+	uint16_t			*address;
+} address_space_t;
+
+typedef struct __modbus_hanle_t
+{
+	modbus_init_t		init;					//communication parameters
+//	const uint16_t		*input_registers;		//pointer to input register buffer
+//	uint8_t				ir_quantity;			//number of input registers
+//	const uint16_t		*holding_registers;		//pointer to holding register buffer
+//	uint8_t				hr_quantity;			//number of holding registers
+	uint32_t			mode;					//slave / master / slave+master
+	UART_HandleTypeDef	*huart;					//pointer to UART handle
+	HAL_LockTypeDef		Lock;					//locking object (useful for RTOS)
+	uint32_t			ErrorCode;				//error code
+	address_space_t		*address_spaces[0x10];
+	uint8_t				num_address_spaces;
+} modbus_handle_t;
+
 
 /*VARIABLES*/
 /*for internal and external usage*/
@@ -65,30 +97,73 @@ static uint16_t Calculate_CRC16(uint8_t *buf, uint16_t length);
 /**
  *
  */
+
+/**
+ * @brief Getting the version of Modbus library.
+ * @param none
+ * @retval version in format (MSB to LSB): 8bits: zeroed, 8bits: Major, 8bits: Minor, 8bits: Patch
+ */
 uint32_t MBR_Get_Version(void)
 {
 	return (MBR_VERSION_MAJOR<<16) | (MBR_VERSION_MINOR<<8) | (MBR_VERSION_PATCH);
 }
 
 /**
- * @brief Initialize the Modbus according to the specified parameters in the UART_InitTypeDef.
+ * @brief Allocating the memory for Modbus handle and making initial setup.
  * @param huart UART handle.
- * @retval void (HAL status)
+ * @retval pointer to modbus handle
  */
-void MBR_Init_Modbus(modbus_handle_t *hmodbus)
+modbus_handle_t *MBR_Init_Modbus(UART_HandleTypeDef *huart)
 {
+	modbus_handle_t *hmodbus;
+
+	hmodbus = (modbus_handle_t*) malloc(sizeof(modbus_handle_t));
+	memset(hmodbus, 0, sizeof(modbus_handle_t));
+
+	hmodbus->huart = huart;
+
 	//init usart and dma
 	HAL_UART_ReceiverTimeout_Config(hmodbus->huart, 34);
 	HAL_UART_EnableReceiverTimeout(hmodbus->huart);
 	HAL_UART_Receive_DMA(hmodbus->huart, buf_modbus, 0x100);
 
-	MBR_Update_Communication_Parameters(hmodbus);
+//	MBR_Update_Communication_Parameters(hmodbus);
+
+	return hmodbus;
+}
+
+/**
+ * @brief Allocating the memory for Address Space handle and making setup of the address space.
+ * @param type Type of address space
+ * @param start_offset Address of the first element in address space
+ * @param size Number of elements in address space
+ * @param address Pointer to array with actual values
+ * @retval pointer to modbus handle
+ */
+address_space_t *MBR_Init_Address_Space(register_type_t type, uint16_t start_offset, uint16_t size, uint16_t *address)
+{
+	address_space_t *address_space;
+
+	address_space = (address_space_t*) malloc(sizeof(address_space_t));
+
+	address_space->type = type;
+	address_space->start_offset = start_offset;
+	address_space->size = size;
+	address_space->address = address;
+
+	return address_space;
+}
+
+void MBR_Destroy_Modbus(modbus_handle_t *hmodbus)
+{
+	//TODO free all address spaces?
+	free(hmodbus);
 }
 
 void MBR_Add_Address_Space(modbus_handle_t *hmodbus, address_space_t *address_space)
 {
 	//if(hmodbus->num_address_spaces < 8)
-	hmodbus->address_spaces[hmodbus->num_address_spaces] = *address_space;
+	hmodbus->address_spaces[hmodbus->num_address_spaces] = address_space;
 	hmodbus->num_address_spaces++;
 }
 
@@ -98,8 +173,9 @@ void MBR_Remove_Address_Space(modbus_handle_t *hmodbus, uint16_t *address)
 
 	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
-		if(hmodbus->address_spaces[i].address == address)	//TODO address has not been found
+		if(hmodbus->address_spaces[i]->address == address)	//TODO address has not been found
 		{
+			free(hmodbus->address_spaces[i]);
 			hmodbus->num_address_spaces--;
 			address_deleted = i;
 			break;
@@ -308,9 +384,9 @@ static void Read_Input_Registers(modbus_handle_t *hmodbus, struct response_s *re
 	response_s->exception = 0x02;
 	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
-		if(hmodbus->address_spaces[i].type == input_registers)
+		if(hmodbus->address_spaces[i]->type == input_registers)
 		{
-			if(start_address >= hmodbus->address_spaces[i].start_offset && start_address + register_count <= hmodbus->address_spaces[i].start_offset + hmodbus->address_spaces[i].size)
+			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address + register_count <= hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
 			{
 				response_s->exception = 0x00;
 				break;
@@ -346,9 +422,9 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 	response_s->exception = 0x02;
 	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
-		if(hmodbus->address_spaces[i].type == holding_registers)
+		if(hmodbus->address_spaces[i]->type == holding_registers)
 		{
-			if(start_address >= hmodbus->address_spaces[i].start_offset && start_address + register_count <= hmodbus->address_spaces[i].start_offset + hmodbus->address_spaces[i].size)
+			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address + register_count <= hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
 			{
 				response_s->exception = 0x00;
 				break;
@@ -372,7 +448,7 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 
 	response_s->frame_size = 5 + buf_modbus[2];
 
-	if(start_address == 0 && register_count == 4)
+	if(start_address == 0 && register_count == 4)	//response to broadcast
 	{
 		response_s->flg_response = 1;
 	}
@@ -523,31 +599,17 @@ static void Send_Exeption(modbus_handle_t *hmodbus, uint8_t exeption_code)
 	Send_Response(hmodbus, 5);	// Send packet response
 }
 
-
-void MBR_Update_Communication_Parameters(modbus_handle_t *hmodbus)
+void MBR_Set_Communication_Parameters(modbus_handle_t *hmodbus, uint8_t slave_id, uint8_t baudrate, uint8_t parity)
 {
 	UART_HandleTypeDef *huart;
 
 	huart = hmodbus->huart;
 
-	/*parity*/
-	switch (hmodbus->init.parity)
-	{
-	case 0:	//none
-		huart->Init.WordLength = UART_WORDLENGTH_8B;
-		huart->Init.Parity = UART_PARITY_NONE;
-		break;
-	case 1:	// even
-		huart->Init.WordLength = UART_WORDLENGTH_9B;
-		huart->Init.Parity = UART_PARITY_EVEN;
-		break;
-	case 2:	//odd
-		huart->Init.WordLength = UART_WORDLENGTH_9B;
-		huart->Init.Parity = UART_PARITY_ODD;
-		break;
-	} //default is even parity
+	hmodbus->init.slave_id = slave_id;
+	hmodbus->init.baudrate = baudrate;
+	hmodbus->init.parity = parity;
 
-	switch (hmodbus->init.baudrate)
+	switch(hmodbus->init.baudrate)
 	{
 	case 0:
 		huart->Init.BaudRate = 4800;
@@ -579,12 +641,23 @@ void MBR_Update_Communication_Parameters(modbus_handle_t *hmodbus)
 		break;
 	} //default is 19200
 
+	/*parity*/
+	switch(hmodbus->init.parity)
+	{
+	case 0:	//none
+		huart->Init.WordLength = UART_WORDLENGTH_8B;
+		huart->Init.Parity = UART_PARITY_NONE;
+		break;
+	case 1:	// even
+		huart->Init.WordLength = UART_WORDLENGTH_9B;
+		huart->Init.Parity = UART_PARITY_EVEN;
+		break;
+	case 2:	//odd
+		huart->Init.WordLength = UART_WORDLENGTH_9B;
+		huart->Init.Parity = UART_PARITY_ODD;
+		break;
+	} //default is even parity
+
 	HAL_UART_Init(huart);
 }
-
-
-
-
-
-
 
