@@ -6,7 +6,7 @@
 enum
 {
 	MBR_VERSION_MAJOR = 0x00,
-	MBR_VERSION_MINOR = 0x05,
+	MBR_VERSION_MINOR = 0x06,
 	MBR_VERSION_PATCH = 0x00
 };
 
@@ -84,6 +84,8 @@ uint8_t flg_modbus_packet_received;
 uint8_t communication_parity;
 uint8_t communication_baudrate;
 uint8_t communication_slave_id;
+
+uint32_t test[2];
 
 /*FUNCTION PROTOTYPES*/
 /*for internal use only*/
@@ -195,29 +197,13 @@ void MBR_Remove_Address_Space(modbus_handle_t *hmodbus, uint16_t *address)
  */
 void MBR_Check_For_Request(modbus_handle_t *hmodbus)
 {
-	UART_HandleTypeDef *huart;
 	uint32_t modbus_no_comm, current_tick;
-
-	huart = hmodbus->huart;
 
 	if(flg_modbus_packet_received)
 	{
 		flg_modbus_packet_received = 0;
 
-		if(huart->ErrorCode == HAL_UART_ERROR_RTO)	//TODO clear this error somewhere
-		{
-			len_modbus_frame = MODBUS_BUFFER_SIZE - huart->hdmarx->Instance->CNDTR;
-			if(len_modbus_frame > 7)	//minimum Modbus frame length (for requests)
-			{
-				Check_Frame(hmodbus);
-			}
-		}
-		else
-		{
-			huart->ErrorCode = HAL_UART_ERROR_NONE;	//called in HAL_UART_Receive_DMA() / HAL_UART_Receive_DMA() function
-		}
-
-		HAL_UART_Receive_DMA(huart, buf_modbus, MODBUS_BUFFER_SIZE);
+		Check_Frame(hmodbus);
 	}
 	else
 	{
@@ -296,12 +282,26 @@ __weak uint32_t Custom_Command_Callback(modbus_handle_t *hmodbus)
 /*HAL CALLBACKS*/
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-	flg_modbus_packet_received = 1;
+	test[0]++;
+	if(huart->ErrorCode == HAL_UART_ERROR_RTO)
+	{
+		len_modbus_frame = MODBUS_BUFFER_SIZE - huart->hdmarx->Instance->CNDTR;
+		if(len_modbus_frame > 7)	//minimum Modbus frame length (for requests)
+		{
+			flg_modbus_packet_received = 1;
+		}
+	}
+
+	huart->ErrorCode = HAL_UART_ERROR_NONE;
+
+	HAL_UART_Receive_DMA(huart, buf_modbus, MODBUS_BUFFER_SIZE);
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+	test[1]++;
 	MBR_End_Sending_Callback(huart);
+	HAL_UART_Receive_DMA(huart, buf_modbus, MODBUS_BUFFER_SIZE);
 }
 
 
@@ -377,18 +377,20 @@ static void Read_Input_Registers(modbus_handle_t *hmodbus, struct response_s *re
 {
 	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t register_count, crc16, data;
+	uint32_t idx_address_space;
 
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 	buf_modbus[2] = register_count*2;	// byte count
 
 	response_s->exception = 0x02;
-	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
+	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
 		if(hmodbus->address_spaces[i]->type == input_registers)
 		{
 			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address + register_count <= hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
 			{
 				response_s->exception = 0x00;
+				idx_address_space = i;
 				break;
 			}
 		}
@@ -399,6 +401,7 @@ static void Read_Input_Registers(modbus_handle_t *hmodbus, struct response_s *re
 		for(uint32_t i = start_address; i < start_address + register_count; i++)
 		{
 			MBR_Register_Read_Callback(hmodbus, i, &data);
+			data = (hmodbus->address_spaces[idx_address_space]->address)[i];
 			buf_modbus[3+(i-start_address)*2] = data>>8;
 			buf_modbus[4+(i-start_address)*2] = data;
 		}
@@ -415,18 +418,20 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 {
 	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t register_count, crc16, data;
+	uint32_t idx_address_space;
 
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 	buf_modbus[2] = register_count*2;	// byte count
 
 	response_s->exception = 0x02;
-	for(uint8_t i=0; i<hmodbus->num_address_spaces; i++)
+	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
 		if(hmodbus->address_spaces[i]->type == holding_registers)
 		{
 			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address + register_count <= hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
 			{
 				response_s->exception = 0x00;
+				idx_address_space = i;
 				break;
 			}
 		}
@@ -437,6 +442,7 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 		for(uint32_t i = start_address; i < start_address + register_count; i++)
 		{
 			MBR_Register_Read_Callback(hmodbus, i, &data);
+			data = (hmodbus->address_spaces[idx_address_space]->address)[i];
 			buf_modbus[3+(i-start_address)*2] = data>>8;
 			buf_modbus[4+(i-start_address)*2] = data;
 		}
@@ -456,53 +462,60 @@ static void Read_Holding_Registers(modbus_handle_t *hmodbus, struct response_s *
 
 static void Write_Multiple_Registers(modbus_handle_t *hmodbus, struct response_s *response_s)
 {
-	uint16_t start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
-	uint16_t register_count, crc16;
+	uint16_t start_address, register_count, crc16;
 	uint16_t reg_data;
 	uint16_t uint_hold_reg_temporary[128/*hold_reg_count*/] = {0};
+	uint32_t idx_address_space;
 
+	start_address  = (buf_modbus[2]<<8)+ buf_modbus[3];
 	register_count =  (buf_modbus[4]<<8)+ buf_modbus[5];
 
-	if(start_address < 1000)
+	response_s->exception = 0x02;
+	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
-//		if(register_count + start_address > hold_reg_count)
-//		{
-//			response_s->exception = 0x02;
-//		}
-		/*else*/ if(buf_modbus[6] != len_modbus_frame-9)	//buffer[6] - byte count: 7 bytes - header, 2 bytes - CRC
+		if(hmodbus->address_spaces[i]->type == holding_registers)
 		{
-			response_s->exception = 0x03;
-		}
-		else
-		{
-			for(uint32_t i = start_address; i < start_address + register_count; i++)
+			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address + register_count <= hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
 			{
-				if(MBR_Check_Restrictions_Callback(hmodbus, start_address, reg_data))
-				{
-					response_s->exception = 0x03;
-				}
-				else
-				{
-					MBR_Register_Update_Callback(hmodbus, start_address, reg_data);
-				}
-
-			}
-			if(response_s->exception)
-			{
-				//				break;	//from case:
+				response_s->exception = 0x00;
+				idx_address_space = i;
+				break;
 			}
 		}
 	}
 
-	for(uint32_t i = start_address; i < start_address + register_count; i++)//write the new data;	//TODO move it under flag no_exception
+	if(response_s->exception == 0)
 	{
-		MBR_Register_Update_Callback(hmodbus, i, uint_hold_reg_temporary[i]);
+		for(uint32_t i = start_address; i < start_address + register_count; i++)
+		{
+			reg_data = (buf_modbus[7+(i-start_address)*2]<<8) + buf_modbus[8+(i-start_address)*2];
+
+			if(MBR_Check_Restrictions_Callback(hmodbus, i, reg_data))
+			{
+				response_s->exception = 0x03;
+				break;
+			}
+			else
+			{
+				uint_hold_reg_temporary[i] = reg_data;
+			}
+
+		}
 	}
 
-	crc16 = Calculate_CRC16(buf_modbus,6);
-	buf_modbus[6] = crc16;								// CRC Lo byte
-	buf_modbus[7] = crc16>>8;							// CRC Hi byte
-	response_s->frame_size = 8;
+	if(response_s->exception == 0)
+	{
+		for(uint32_t i = start_address; i < start_address + register_count; i++)//write the new data;	//TODO move it under flag no_exception
+		{
+			(hmodbus->address_spaces[idx_address_space]->address)[start_address] = uint_hold_reg_temporary[i-start_address];
+			MBR_Register_Update_Callback(hmodbus, i, uint_hold_reg_temporary[i-start_address]);
+		}
+
+		crc16 = Calculate_CRC16(buf_modbus,6);
+		buf_modbus[6] = crc16;								// CRC Lo byte
+		buf_modbus[7] = crc16>>8;							// CRC Hi byte
+		response_s->frame_size = 8;
+	}
 }
 
 static void Write_Single_Register(modbus_handle_t *hmodbus, struct response_s *response_s)
@@ -510,31 +523,43 @@ static void Write_Single_Register(modbus_handle_t *hmodbus, struct response_s *r
 	uint16_t start_address = (buf_modbus[2]<<8)+ buf_modbus[3];
 	uint16_t crc16;
 	uint16_t reg_data;
+	uint32_t idx_address_space;
 
-	reg_data = (buf_modbus[4]<<8)+ buf_modbus[5];
-
-//	if(start_address >= hold_reg_count)
-//	{
-//		response_s->exception = 0x02;
-//	}
-//	else
+	response_s->exception = 0x02;
+	for(uint32_t i=0; i<hmodbus->num_address_spaces; i++)
 	{
+		if(hmodbus->address_spaces[i]->type == holding_registers)
+		{
+			if(start_address >= hmodbus->address_spaces[i]->start_offset && start_address < hmodbus->address_spaces[i]->start_offset + hmodbus->address_spaces[i]->size)
+			{
+				response_s->exception = 0x00;
+				idx_address_space = i;
+				break;
+			}
+		}
+	}
+
+	if(response_s->exception == 0)
+	{
+		reg_data = (buf_modbus[4]<<8)+ buf_modbus[5];
+
 		if(MBR_Check_Restrictions_Callback(hmodbus, start_address, reg_data))
 		{
 			response_s->exception = 0x03;
 		}
 		else
 		{
+			(hmodbus->address_spaces[idx_address_space]->address)[start_address] = reg_data;
 			MBR_Register_Update_Callback(hmodbus, start_address, reg_data);
 		}
-	}
 
-	buf_modbus[4] = reg_data>>8;	//Register value 1st byte
-	buf_modbus[5] = reg_data;	//Register value 2nd byte
-	crc16 = Calculate_CRC16(buf_modbus,6);
-	buf_modbus[6] = crc16;	//CRC Lo byte
-	buf_modbus[7] = crc16>>8;	//CRC Hi byte
-	response_s->frame_size = 8;
+		buf_modbus[4] = reg_data>>8;	//Register value 1st byte
+		buf_modbus[5] = reg_data;	//Register value 2nd byte
+		crc16 = Calculate_CRC16(buf_modbus,6);
+		buf_modbus[6] = crc16;	//CRC Lo byte
+		buf_modbus[7] = crc16>>8;	//CRC Hi byte
+		response_s->frame_size = 8;
+	}
 }
 
 static void Process_Request(modbus_handle_t *hmodbus)
@@ -658,6 +683,8 @@ void MBR_Set_Communication_Parameters(modbus_handle_t *hmodbus, uint8_t slave_id
 		break;
 	} //default is even parity
 
+	HAL_UART_Abort_IT(huart);	//TODO do we need _IT function?
 	HAL_UART_Init(huart);
+	HAL_UART_Receive_DMA(hmodbus->huart, buf_modbus, 0x100);
 }
 
