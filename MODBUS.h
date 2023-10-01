@@ -9,6 +9,24 @@ typedef enum
 	holding_registers	= 1
 } register_type_t;
 
+typedef enum exception_code_e
+{
+	illegal_function			= 0x01,
+	illegal_data_address		= 0x02,
+	illegal_data_value			= 0x03,
+	slave_device_failure		= 0x04,
+	acknowledgement				= 0x05,
+	slave_device_busy			= 0x06,
+	negative_acknowledgement	= 0x07,
+	memory_parity_error			= 0x08
+} exception_code_t;
+
+typedef struct response_s {
+	exception_code_t exception;;
+	uint8_t payload_size;
+	uint8_t flg_response;
+} response_t;
+
 
 typedef struct __address_space_t address_space_t;
 typedef struct __modbus_hanle_t modbus_handle_t;
@@ -32,16 +50,15 @@ uint8_t MBR_Check_Restrictions_Callback(modbus_handle_t *hmodbus, uint16_t regis
 
 void MBR_Register_Update_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t register_data);
 void MBR_Register_Read_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data);
-void MBR_Register_Init_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data);
+//void MBR_Register_Init_Callback(modbus_handle_t *hmodbus, uint16_t register_address, uint16_t *register_data);
 
 void MBR_Start_Sending_Callback(UART_HandleTypeDef *huart);
 void MBR_End_Sending_Callback(UART_HandleTypeDef *huart);
 
-void MBR_Update_Communication_Parameters(modbus_handle_t *hmodbus);
-
 void MBR_Communication_Lost_Callback(modbus_handle_t *hmodbus);
 void MBR_Communication_Restored_Callback(modbus_handle_t *hmodbus);
 
-uint32_t Custom_Command_Callback(modbus_handle_t *hmodbus);
+void MBR_Custom_Command_Callback(uint8_t *buf_modbus, response_t *response);
+uint16_t Calculate_CRC16(uint8_t *buf, uint16_t length);
 
 #endif
